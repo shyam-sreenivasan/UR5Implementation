@@ -811,6 +811,389 @@ def visualize_trajectory_interactive(dh_params, screw_axes, M, start_config):
     plt.show()
     print("✓ Interactive trajectory control complete")
 
+def visualize_square_motion(dh_params, screw_axes, M, start_config):
+    """6) Square motion with sliders and square controls."""
+    print(f"\n=== Visualization 6: Square Motion Control ===")
+    print("Use sliders to set joint angles, then trace square paths")
+    
+    fig = plt.figure(figsize=(18, 12))
+    ax = fig.add_subplot(111, projection='3d')
+    plt.subplots_adjust(left=0.1, right=0.9, bottom=0.40, top=0.95)
+    
+    # State variables
+    home_config = np.array(start_config, dtype=float)
+    current_config = np.array(start_config, dtype=float)
+    current_q = [0.0] * 6
+    trajectory_history = []
+    
+    square_axis = [0, 0, 1]  # Normal to square plane
+    square_side = [50.0]  # Side length in mm (minimum 50mm)
+    current_step = 0  # 0-15 (4 corners × 4 steps per side)
+    square_center = None
+    square_initialized = False
+    
+    T_current = forward_kinematics_poe(screw_axes, M, current_config)
+    current_position = T_current[0:3, 3].copy()
+    trajectory_history.append(current_position.copy())
+    
+    # Track if we're in automated movement
+    in_automated_move = [False]
+    
+    def initialize_square():
+        nonlocal square_center, square_initialized, current_step, current_position
+        T_current = forward_kinematics_poe(screw_axes, M, current_config)
+        current_pos = T_current[0:3, 3].copy()
+        
+        axis = np.array(square_axis, dtype=float)
+        axis = axis / np.linalg.norm(axis)
+        
+        # Create two perpendicular vectors in the plane
+        if not np.allclose(axis, [1, 0, 0]):
+            v1 = np.cross(axis, [1, 0, 0])
+        else:
+            v1 = np.cross(axis, [0, 1, 0])
+        v1 = v1 / np.linalg.norm(v1)
+        v2 = np.cross(axis, v1)
+        v2 = v2 / np.linalg.norm(v2)
+        
+        # Current position IS corner 0 (bottom-left)
+        # So center is offset by half the side length in both directions
+        square_center = current_pos
+        square_initialized = True
+        current_step = 0
+        current_position = current_pos.copy()
+        
+        print(f"\n◻️ Square initialized at corner 0, side: {square_side[0]:.0f}mm")
+    
+    def compute_square_point(step):
+        """Compute point on square at given step (0-15 means 4 corners, 4 steps each)."""
+        axis = np.array(square_axis, dtype=float)
+        axis = axis / np.linalg.norm(axis)
+        
+        if not np.allclose(axis, [1, 0, 0]):
+            v1 = np.cross(axis, [1, 0, 0])
+        else:
+            v1 = np.cross(axis, [0, 1, 0])
+        v1 = v1 / np.linalg.norm(v1)
+        v2 = np.cross(axis, v1)
+        v2 = v2 / np.linalg.norm(v2)
+        
+        # Divide each side into 4 steps
+        side = square_side[0]
+        step_size = side / 4.0
+        
+        # Determine which side and position along that side
+        side_num = step // 4
+        pos_on_side = (step % 4) * step_size
+        
+        # Square corners starting from current position (corner 0):
+        # Corner 0: current position (0, 0)
+        # Corner 1: move right along v1 → (side, 0)
+        # Corner 2: move up along v2 → (side, side)
+        # Corner 3: move left → (0, side)
+        # Back to Corner 0: (0, 0)
+        
+        if side_num == 0:  # Bottom edge (corner 0 to corner 1, moving along +v1)
+            offset = pos_on_side * v1
+        elif side_num == 1:  # Right edge (corner 1 to corner 2, moving along +v2)
+            offset = side * v1 + pos_on_side * v2
+        elif side_num == 2:  # Top edge (corner 2 to corner 3, moving along -v1)
+            offset = (side - pos_on_side) * v1 + side * v2
+        else:  # Left edge (corner 3 to corner 0, moving along -v2)
+            offset = (side - pos_on_side) * v2
+        
+        point = square_center + offset
+        return point
+    
+    def plot_robot():
+        ax.clear()
+        _, transforms = forward_kinematics_dh(dh_params, current_config)
+        
+        pts = np.zeros((len(transforms) + 1, 3))
+        pts[0] = np.zeros(3)
+        for i, T in enumerate(transforms):
+            pts[i + 1] = T[0:3, 3]
+            if i == len(transforms) - 1:
+                draw_frame_3d(ax, T, scale=60, alpha=0.8)
+        
+        ax.plot(pts[:, 0], pts[:, 1], pts[:, 2], 'ko-', linewidth=5, markersize=12, label='Robot')
+        
+        if len(trajectory_history) > 1:
+            traj = np.array(trajectory_history)
+            ax.plot(traj[:, 0], traj[:, 1], traj[:, 2], 'r-', linewidth=3, alpha=0.7, label='Path')
+            ax.plot(traj[:, 0], traj[:, 1], traj[:, 2], 'r.', markersize=8)
+        
+        if square_initialized:
+            # Draw center marker at corner 0 (starting position)
+            ax.plot([square_center[0]], [square_center[1]], [square_center[2]], 
+                   'g*', markersize=20, label='Corner 0')
+            
+            # Draw full square preview
+            preview_steps = list(range(17))  # 0 to 16 to close the square
+            preview_pts = np.array([compute_square_point(s % 16) for s in preview_steps])
+            ax.plot(preview_pts[:, 0], preview_pts[:, 1], preview_pts[:, 2], 
+                   'g--', linewidth=2, alpha=0.4, label='Square')
+        
+        current_ee = pts[-1]
+        ax.plot([current_ee[0]], [current_ee[1]], [current_ee[2]], 'ro', markersize=18, label='End-Effector')
+        
+        ax.set_xlabel('X (mm)', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Y (mm)', fontsize=12, fontweight='bold')
+        ax.set_zlabel('Z (mm)', fontsize=12, fontweight='bold')
+        
+        axis_name = 'Z' if np.allclose(square_axis, [0,0,1]) else 'X' if np.allclose(square_axis, [1,0,0]) else 'Y'
+        plane_name = 'XY' if axis_name == 'Z' else 'YZ' if axis_name == 'X' else 'XZ'
+        corner = current_step // 4
+        pos_in_corner = current_step % 4
+        ax.set_title(f'Square | Axis: {axis_name} | Plane: {plane_name} | Side: {square_side[0]:.0f}mm | Corner: {corner} Step: {pos_in_corner}', 
+                    fontsize=13, fontweight='bold')
+        
+        lim = 900
+        ax.set_xlim(-lim, lim)
+        ax.set_ylim(-lim, lim)
+        ax.set_zlim(-lim, lim)
+        ax.set_box_aspect([1, 1, 1])
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper right', fontsize=10)
+        fig.canvas.draw_idle()
+    
+    def update_from_sliders():
+        nonlocal current_config, current_position, trajectory_history, square_initialized
+        current_config = np.array(current_q, dtype=float)
+        T_current = forward_kinematics_poe(screw_axes, M, current_config)
+        current_position = T_current[0:3, 3].copy()
+        trajectory_history = [current_position.copy()]
+        square_initialized = False
+        plot_robot()
+    
+    def step_forward(e):
+        nonlocal current_config, current_position, current_step, trajectory_history, current_q
+        if not square_initialized:
+            print("⚠️ Initialize square first!")
+            return
+        
+        current_step = (current_step + 1) % 16  # 16 steps total (4 sides × 4 steps)
+        
+        target_position = compute_square_point(current_step)
+        
+        T_check = np.eye(4)
+        T_check[0:3, 3] = target_position
+        if not is_pose_reachable(T_check):
+            print(f"✗ Outside workspace!")
+            return
+        
+        T_current = forward_kinematics_poe(screw_axes, M, current_config)
+        T_target = T_current.copy()
+        T_target[0:3, 3] = target_position
+        
+        theta_new, success, iters, error = inverse_kinematics_space(
+            T_target, screw_axes, M, current_config, tol=3.0, verbose=False
+        )
+        
+        T_achieved = forward_kinematics_poe(screw_axes, M, theta_new)
+        actual_position = T_achieved[0:3, 3]
+        
+        current_config = theta_new
+        current_position = actual_position.copy()
+        trajectory_history.append(current_position.copy())
+        
+        # Update sliders without triggering square reset
+        in_automated_move[0] = True
+        for i in range(6):
+            current_q[i] = theta_new[i]
+            sliders[i].set_val(np.rad2deg(theta_new[i]))
+        in_automated_move[0] = False
+        
+        corner = current_step // 4
+        pos_in_corner = current_step % 4
+        status = "✓" if success else "✗"
+        print(f"{status} Corner {corner}, Step {pos_in_corner}, Error: {error:.2f}mm")
+        plot_robot()
+    
+    def step_backward(e):
+        nonlocal current_config, current_position, current_step, trajectory_history, current_q
+        if not square_initialized:
+            print("⚠️ Initialize square first!")
+            return
+        
+        current_step = (current_step - 1) % 16
+        
+        target_position = compute_square_point(current_step)
+        
+        T_check = np.eye(4)
+        T_check[0:3, 3] = target_position
+        if not is_pose_reachable(T_check):
+            print(f"✗ Outside workspace!")
+            return
+        
+        T_current = forward_kinematics_poe(screw_axes, M, current_config)
+        T_target = T_current.copy()
+        T_target[0:3, 3] = target_position
+        
+        theta_new, success, iters, error = inverse_kinematics_space(
+            T_target, screw_axes, M, current_config, tol=3.0, verbose=False
+        )
+        
+        T_achieved = forward_kinematics_poe(screw_axes, M, theta_new)
+        actual_position = T_achieved[0:3, 3]
+        
+        current_config = theta_new
+        current_position = actual_position.copy()
+        trajectory_history.append(current_position.copy())
+        
+        # Update sliders without triggering square reset
+        in_automated_move[0] = True
+        for i in range(6):
+            current_q[i] = theta_new[i]
+            sliders[i].set_val(np.rad2deg(theta_new[i]))
+        in_automated_move[0] = False
+        
+        corner = current_step // 4
+        pos_in_corner = current_step % 4
+        status = "✓" if success else "✗"
+        print(f"{status} Corner {corner}, Step {pos_in_corner}, Error: {error:.2f}mm")
+        plot_robot()
+    
+    def set_axis_x(e):
+        nonlocal square_axis, square_initialized
+        square_axis = [1, 0, 0]
+        square_initialized = False
+        print("\n🔴 Axis: X (square in YZ plane)")
+    
+    def set_axis_y(e):
+        nonlocal square_axis, square_initialized
+        square_axis = [0, 1, 0]
+        square_initialized = False
+        print("\n🟢 Axis: Y (square in XZ plane)")
+    
+    def set_axis_z(e):
+        nonlocal square_axis, square_initialized
+        square_axis = [0, 0, 1]
+        square_initialized = False
+        print("\n🔵 Axis: Z (square in XY plane)")
+    
+    def increase_side(e):
+        nonlocal square_initialized
+        square_side[0] += 10.0
+        square_initialized = False
+        print(f"\n📏 Side length: {square_side[0]:.0f}mm")
+        plot_robot()
+    
+    def decrease_side(e):
+        nonlocal square_initialized
+        if square_side[0] > 50.0:
+            square_side[0] -= 10.0
+            square_initialized = False
+            print(f"\n📏 Side length: {square_side[0]:.0f}mm")
+        else:
+            print("\n⚠️ Min side length: 50mm")
+        plot_robot()
+    
+    def init_square_btn(e):
+        initialize_square()
+        plot_robot()
+    
+    def reset(e):
+        nonlocal trajectory_history, square_initialized, current_step
+        trajectory_history = [current_position.copy()]
+        square_initialized = False
+        current_step = 0
+        print("\n🔄 Reset")
+        plot_robot()
+    
+    def go_home(e):
+        nonlocal current_config, current_position, trajectory_history, square_initialized, current_step, current_q
+        current_config = home_config.copy()
+        T_current = forward_kinematics_poe(screw_axes, M, current_config)
+        current_position = T_current[0:3, 3].copy()
+        trajectory_history = [current_position.copy()]
+        square_initialized = False
+        current_step = 0
+        for i in range(6):
+            current_q[i] = 0.0
+            sliders[i].set_val(0)
+        print("\n🏠 Home")
+        plot_robot()
+    
+    def random_pose(e):
+        nonlocal current_config, current_position, trajectory_history, square_initialized, current_step, current_q
+        for _ in range(50):
+            q_random = np.random.uniform(-np.pi, np.pi, 6)
+            T_random = forward_kinematics_poe(screw_axes, M, q_random)
+            if is_pose_reachable(T_random):
+                current_config = q_random
+                current_position = T_random[0:3, 3].copy()
+                trajectory_history = [current_position.copy()]
+                square_initialized = False
+                current_step = 0
+                for i in range(6):
+                    current_q[i] = q_random[i]
+                    sliders[i].set_val(np.rad2deg(q_random[i]))
+                print(f"\n🎲 Random: {np.round(current_position, 1)}")
+                plot_robot()
+                return
+    
+    # Create sliders
+    sliders = []
+    def make_slider_update(idx):
+        def update(val):
+            if not in_automated_move[0]:
+                current_q[idx] = np.deg2rad(val)
+                update_from_sliders()
+            else:
+                current_q[idx] = np.deg2rad(val)
+        return update
+    
+    for i in range(6):
+        ax_slider = plt.axes([0.15, 0.33 - i * 0.035, 0.7, 0.02])
+        slider = Slider(ax_slider, f'θ{i+1}', -180, 180, valinit=0, valstep=1)
+        slider.on_changed(make_slider_update(i))
+        sliders.append(slider)
+    
+    # Create buttons
+    button_width = 0.08
+    button_height = 0.035
+    
+    ax_axis_x = plt.axes([0.15, 0.11, button_width, button_height])
+    ax_axis_y = plt.axes([0.28, 0.11, button_width, button_height])
+    ax_axis_z = plt.axes([0.41, 0.11, button_width, button_height])
+    ax_side_minus = plt.axes([0.15, 0.06, button_width, button_height])
+    ax_side_plus = plt.axes([0.28, 0.06, button_width, button_height])
+    ax_init = plt.axes([0.46, 0.085, button_width, button_height])
+    ax_step_fwd = plt.axes([0.54, 0.085, button_width, button_height])
+    ax_step_bwd = plt.axes([0.62, 0.085, button_width, button_height])
+    ax_home = plt.axes([0.70, 0.085, button_width, button_height])
+    ax_random = plt.axes([0.78, 0.085, button_width, button_height])
+    ax_reset = plt.axes([0.86, 0.085, button_width, button_height])
+    
+    btn_axis_x = Button(ax_axis_x, 'Axis: X', color='lightcoral', hovercolor='coral')
+    btn_axis_y = Button(ax_axis_y, 'Axis: Y', color='lightgreen', hovercolor='green')
+    btn_axis_z = Button(ax_axis_z, 'Axis: Z', color='lightblue', hovercolor='blue')
+    btn_side_minus = Button(ax_side_minus, 'Side -10mm', color='mistyrose', hovercolor='lightpink')
+    btn_side_plus = Button(ax_side_plus, 'Side +10mm', color='mistyrose', hovercolor='lightpink')
+    btn_init = Button(ax_init, 'Init Square', color='wheat', hovercolor='orange')
+    btn_step_fwd = Button(ax_step_fwd, 'Step (+)', color='lightsteelblue', hovercolor='steelblue')
+    btn_step_bwd = Button(ax_step_bwd, 'Step (−)', color='lightsteelblue', hovercolor='steelblue')
+    btn_home = Button(ax_home, 'Home', color='lightcyan', hovercolor='cyan')
+    btn_random = Button(ax_random, 'Random', color='plum', hovercolor='violet')
+    btn_reset = Button(ax_reset, 'Reset', color='lightyellow', hovercolor='yellow')
+    
+    btn_axis_x.on_clicked(set_axis_x)
+    btn_axis_y.on_clicked(set_axis_y)
+    btn_axis_z.on_clicked(set_axis_z)
+    btn_side_minus.on_clicked(decrease_side)
+    btn_side_plus.on_clicked(increase_side)
+    btn_init.on_clicked(init_square_btn)
+    btn_step_fwd.on_clicked(step_forward)
+    btn_step_bwd.on_clicked(step_backward)
+    btn_reset.on_clicked(reset)
+    btn_home.on_clicked(go_home)
+    btn_random.on_clicked(random_pose)
+    
+    plot_robot()
+    plt.show()
+    print("✓ Square motion control complete")
+
 def visualize_circular_motion(dh_params, screw_axes, M, start_config):
     """5) Circular motion with sliders and circle controls."""
     print(f"\n=== Visualization 5: Circular Motion Control ===")
@@ -1163,6 +1546,10 @@ if __name__ == "__main__":
     # 5) Circular motion control with sliders
     print("\nStarting circular motion control...")
     visualize_circular_motion(ur5_dh_params, screw_axes, M, start_config=np.zeros(6))
+    
+    # 6) Square motion control with sliders
+    print("\nStarting square motion control...")
+    visualize_square_motion(ur5_dh_params, screw_axes, M, start_config=np.zeros(6))
     
     print("\n" + "="*70)
     print("ALL VISUALIZATIONS COMPLETE")
