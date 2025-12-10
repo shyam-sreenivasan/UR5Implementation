@@ -185,6 +185,85 @@ def generate_reachable_test_target(screw_axes, M, start_config, max_distance=200
 # -------------------------
 # IK Solvers
 # -------------------------
+def simple_IK_solver(T_desired, screw_axes, M, initial_guess, tol=3.0, max_iters=500):
+    """
+    Simple IK solver optimized for trajectory planning.
+    Uses damped least squares with adaptive damping.
+    
+    Args:
+        T_desired: Target SE(3) transformation
+        screw_axes: List of screw axes
+        M: Home configuration
+        initial_guess: Initial joint configuration
+        tol: Position error tolerance in mm
+        max_iters: Maximum iterations
+        
+    Returns:
+        theta: Joint angles solution
+        success: True if converged within tolerance
+        iterations: Number of iterations used
+        pos_error: Final position error in mm
+    """
+    theta = np.array(initial_guess, dtype=float)
+    
+    for iteration in range(max_iters):
+        # Compute current pose
+        T_current = forward_kinematics_poe(screw_axes, M, theta)
+        
+        # Compute error in SE(3)
+        T_err = T_desired @ np.linalg.inv(T_current)
+        se3_err = matrix_log6(T_err)
+        
+        # Position error for convergence check
+        pos_error = np.linalg.norm(T_desired[0:3, 3] - T_current[0:3, 3])
+        
+        # Check convergence
+        if pos_error < tol:
+            return theta, True, iteration, pos_error
+        
+        # Compute Jacobian
+        J_s = compute_space_jacobian(screw_axes, theta)
+        
+        # Adaptive damping based on error magnitude
+        err_norm = np.linalg.norm(se3_err)
+        if err_norm > 100:
+            damping = 0.001
+        elif err_norm > 50:
+            damping = 0.005
+        elif err_norm > 10:
+            damping = 0.01
+        else:
+            damping = 0.05
+        
+        # Damped least squares
+        JJt = J_s @ J_s.T
+        inv_term = np.linalg.inv(JJt + (damping**2) * np.eye(6))
+        J_pinv = J_s.T @ inv_term
+        
+        # Compute update
+        delta = J_pinv @ se3_err
+        
+        # Adaptive step size
+        if err_norm > 50:
+            step_limit = 0.5
+        elif err_norm > 10:
+            step_limit = 0.3
+        else:
+            step_limit = 0.2
+        
+        step_norm = np.linalg.norm(delta)
+        if step_norm > step_limit:
+            delta = delta * (step_limit / step_norm)
+        
+        # Update joint angles
+        theta = theta + delta
+    
+    # Final error
+    T_final = forward_kinematics_poe(screw_axes, M, theta)
+    final_pos_error = np.linalg.norm(T_desired[0:3, 3] - T_final[0:3, 3])
+    
+    return theta, final_pos_error < tol, max_iters, final_pos_error
+
 def _inverse_kinematics_space_single(T_desired, screw_axes, M, initial_guess, 
                                      tol=3.0, max_iters=2000):
     """Single attempt IK with line search."""
@@ -322,6 +401,7 @@ def plan_straight_line_trajectory(screw_axes, M, start_config, direction, step_s
     """
     Plan a straight-line trajectory in Cartesian space.
     Only proceeds if target positions are within workspace.
+    Uses simple_IK_solver for better trajectory continuity.
     """
     trajectory = []
     current_config = np.array(start_config, dtype=float)
@@ -359,9 +439,9 @@ def plan_straight_line_trajectory(screw_axes, M, start_config, direction, step_s
         T_target = T_current.copy()
         T_target[0:3, 3] = target_position
         
-        # Solve IK using current config as initial guess
-        theta_new, success, iters, error = inverse_kinematics_space(
-            T_target, screw_axes, M, current_config, tol=3.0, verbose=False
+        # Solve IK using simple solver with current config as initial guess
+        theta_new, success, iters, error = simple_IK_solver(
+            T_target, screw_axes, M, current_config, tol=3.0, max_iters=500
         )
         
         # Verify actual position achieved
@@ -548,6 +628,7 @@ def visualize_ik_path(dh_params, screw_axes, M, start_config, target_position):
     
     print(f"\nIK Result: {'✓ SUCCESS' if success else '✗ FAILED'}")
     print(f"Final error: {error:.2f} mm, Total iterations: {iters}")
+    print("IK Solution (joint angles in radians):   ", theta_solution)
     
     # Plot
     fig = plt.figure(figsize=(16, 14))
@@ -685,7 +766,7 @@ def visualize_trajectory_interactive(dh_params, screw_axes, M, start_config):
         plot_robot()
     
     def move_direction(direction, step_size=10.0):
-        """Move end-effector in specified direction."""
+        """Move end-effector in specified direction using simple_IK_solver."""
         nonlocal current_config, current_position, current_q
         
         target_position = current_position + np.array(direction) * step_size
@@ -701,8 +782,8 @@ def visualize_trajectory_interactive(dh_params, screw_axes, M, start_config):
         T_target[0:3, 3] = target_position
         
         print(f"\nMoving {direction} by {step_size}mm...")
-        theta_new, success, iters, error = inverse_kinematics_space(
-            T_target, screw_axes, M, current_config, tol=3.0, verbose=False
+        theta_new, success, iters, error = simple_IK_solver(
+            T_target, screw_axes, M, current_config, tol=3.0, max_iters=500
         )
         
         T_achieved = forward_kinematics_poe(screw_axes, M, theta_new)
@@ -812,7 +893,7 @@ def visualize_trajectory_interactive(dh_params, screw_axes, M, start_config):
     print("✓ Interactive trajectory control complete")
 
 def visualize_square_motion(dh_params, screw_axes, M, start_config):
-    """6) Square motion with sliders and square controls."""
+    """6) Square motion with sliders and square controls using simple_IK_solver."""
     print(f"\n=== Visualization 6: Square Motion Control ===")
     print("Use sliders to set joint angles, then trace square paths")
     
@@ -826,9 +907,9 @@ def visualize_square_motion(dh_params, screw_axes, M, start_config):
     current_q = [0.0] * 6
     trajectory_history = []
     
-    square_axis = [0, 0, 1]  # Normal to square plane
-    square_side = [50.0]  # Side length in mm (minimum 50mm)
-    current_step = 0  # 0-15 (4 corners × 4 steps per side)
+    square_axis = [0, 0, 1]
+    square_side = [50.0]
+    current_step = 0
     square_center = None
     square_initialized = False
     
@@ -836,7 +917,6 @@ def visualize_square_motion(dh_params, screw_axes, M, start_config):
     current_position = T_current[0:3, 3].copy()
     trajectory_history.append(current_position.copy())
     
-    # Track if we're in automated movement
     in_automated_move = [False]
     
     def initialize_square():
@@ -844,20 +924,6 @@ def visualize_square_motion(dh_params, screw_axes, M, start_config):
         T_current = forward_kinematics_poe(screw_axes, M, current_config)
         current_pos = T_current[0:3, 3].copy()
         
-        axis = np.array(square_axis, dtype=float)
-        axis = axis / np.linalg.norm(axis)
-        
-        # Create two perpendicular vectors in the plane
-        if not np.allclose(axis, [1, 0, 0]):
-            v1 = np.cross(axis, [1, 0, 0])
-        else:
-            v1 = np.cross(axis, [0, 1, 0])
-        v1 = v1 / np.linalg.norm(v1)
-        v2 = np.cross(axis, v1)
-        v2 = v2 / np.linalg.norm(v2)
-        
-        # Current position IS corner 0 (bottom-left)
-        # So center is offset by half the side length in both directions
         square_center = current_pos
         square_initialized = True
         current_step = 0
@@ -878,28 +944,19 @@ def visualize_square_motion(dh_params, screw_axes, M, start_config):
         v2 = np.cross(axis, v1)
         v2 = v2 / np.linalg.norm(v2)
         
-        # Divide each side into 4 steps
         side = square_side[0]
         step_size = side / 4.0
         
-        # Determine which side and position along that side
         side_num = step // 4
         pos_on_side = (step % 4) * step_size
         
-        # Square corners starting from current position (corner 0):
-        # Corner 0: current position (0, 0)
-        # Corner 1: move right along v1 → (side, 0)
-        # Corner 2: move up along v2 → (side, side)
-        # Corner 3: move left → (0, side)
-        # Back to Corner 0: (0, 0)
-        
-        if side_num == 0:  # Bottom edge (corner 0 to corner 1, moving along +v1)
+        if side_num == 0:
             offset = pos_on_side * v1
-        elif side_num == 1:  # Right edge (corner 1 to corner 2, moving along +v2)
+        elif side_num == 1:
             offset = side * v1 + pos_on_side * v2
-        elif side_num == 2:  # Top edge (corner 2 to corner 3, moving along -v1)
+        elif side_num == 2:
             offset = (side - pos_on_side) * v1 + side * v2
-        else:  # Left edge (corner 3 to corner 0, moving along -v2)
+        else:
             offset = (side - pos_on_side) * v2
         
         point = square_center + offset
@@ -924,12 +981,10 @@ def visualize_square_motion(dh_params, screw_axes, M, start_config):
             ax.plot(traj[:, 0], traj[:, 1], traj[:, 2], 'r.', markersize=8)
         
         if square_initialized:
-            # Draw center marker at corner 0 (starting position)
             ax.plot([square_center[0]], [square_center[1]], [square_center[2]], 
                    'g*', markersize=20, label='Corner 0')
             
-            # Draw full square preview
-            preview_steps = list(range(17))  # 0 to 16 to close the square
+            preview_steps = list(range(17))
             preview_pts = np.array([compute_square_point(s % 16) for s in preview_steps])
             ax.plot(preview_pts[:, 0], preview_pts[:, 1], preview_pts[:, 2], 
                    'g--', linewidth=2, alpha=0.4, label='Square')
@@ -972,7 +1027,7 @@ def visualize_square_motion(dh_params, screw_axes, M, start_config):
             print("⚠️ Initialize square first!")
             return
         
-        current_step = (current_step + 1) % 16  # 16 steps total (4 sides × 4 steps)
+        current_step = (current_step + 1) % 16
         
         target_position = compute_square_point(current_step)
         
@@ -986,8 +1041,8 @@ def visualize_square_motion(dh_params, screw_axes, M, start_config):
         T_target = T_current.copy()
         T_target[0:3, 3] = target_position
         
-        theta_new, success, iters, error = inverse_kinematics_space(
-            T_target, screw_axes, M, current_config, tol=3.0, verbose=False
+        theta_new, success, iters, error = simple_IK_solver(
+            T_target, screw_axes, M, current_config, tol=3.0, max_iters=500
         )
         
         T_achieved = forward_kinematics_poe(screw_axes, M, theta_new)
@@ -997,7 +1052,6 @@ def visualize_square_motion(dh_params, screw_axes, M, start_config):
         current_position = actual_position.copy()
         trajectory_history.append(current_position.copy())
         
-        # Update sliders without triggering square reset
         in_automated_move[0] = True
         for i in range(6):
             current_q[i] = theta_new[i]
@@ -1030,8 +1084,8 @@ def visualize_square_motion(dh_params, screw_axes, M, start_config):
         T_target = T_current.copy()
         T_target[0:3, 3] = target_position
         
-        theta_new, success, iters, error = inverse_kinematics_space(
-            T_target, screw_axes, M, current_config, tol=3.0, verbose=False
+        theta_new, success, iters, error = simple_IK_solver(
+            T_target, screw_axes, M, current_config, tol=3.0, max_iters=500
         )
         
         T_achieved = forward_kinematics_poe(screw_axes, M, theta_new)
@@ -1041,7 +1095,6 @@ def visualize_square_motion(dh_params, screw_axes, M, start_config):
         current_position = actual_position.copy()
         trajectory_history.append(current_position.copy())
         
-        # Update sliders without triggering square reset
         in_automated_move[0] = True
         for i in range(6):
             current_q[i] = theta_new[i]
@@ -1195,7 +1248,7 @@ def visualize_square_motion(dh_params, screw_axes, M, start_config):
     print("✓ Square motion control complete")
 
 def visualize_circular_motion(dh_params, screw_axes, M, start_config):
-    """5) Circular motion with sliders and circle controls."""
+    """5) Circular motion with sliders and circle controls using simple_IK_solver."""
     print(f"\n=== Visualization 5: Circular Motion Control ===")
     print("Use sliders to set joint angles, then trace circular paths")
     
@@ -1308,10 +1361,9 @@ def visualize_circular_motion(dh_params, screw_axes, M, start_config):
         T_current = forward_kinematics_poe(screw_axes, M, current_config)
         current_position = T_current[0:3, 3].copy()
         trajectory_history = [current_position.copy()]
-        circle_initialized = False  # Only reset when manually moved
+        circle_initialized = False
         plot_robot()
     
-    # Track if we're in the middle of automated movement (step_circle)
     in_automated_move = [False]
     
     def step_circle(e):
@@ -1320,7 +1372,7 @@ def visualize_circular_motion(dh_params, screw_axes, M, start_config):
             print("⚠️ Initialize circle first!")
             return
         
-        current_angle += 10.0
+        current_angle += 2.0
         if current_angle >= 360.0:
             current_angle = 0.0
         
@@ -1336,8 +1388,8 @@ def visualize_circular_motion(dh_params, screw_axes, M, start_config):
         T_target = T_current.copy()
         T_target[0:3, 3] = target_position
         
-        theta_new, success, iters, error = inverse_kinematics_space(
-            T_target, screw_axes, M, current_config, tol=3.0, verbose=False
+        theta_new, success, iters, error = simple_IK_solver(
+            T_target, screw_axes, M, current_config, tol=3.0, max_iters=500
         )
         
         T_achieved = forward_kinematics_poe(screw_axes, M, theta_new)
@@ -1347,7 +1399,6 @@ def visualize_circular_motion(dh_params, screw_axes, M, start_config):
         current_position = actual_position.copy()
         trajectory_history.append(current_position.copy())
         
-        # Update sliders without triggering circle reset
         in_automated_move[0] = True
         for i in range(6):
             current_q[i] = theta_new[i]
@@ -1441,10 +1492,10 @@ def visualize_circular_motion(dh_params, screw_axes, M, start_config):
     sliders = []
     def make_slider_update(idx):
         def update(val):
-            if not in_automated_move[0]:  # Only update from manual slider movement
+            if not in_automated_move[0]:
                 current_q[idx] = np.deg2rad(val)
                 update_from_sliders()
-            else:  # Just update the value during automated movement
+            else:
                 current_q[idx] = np.deg2rad(val)
         return update
     
@@ -1508,9 +1559,20 @@ if __name__ == "__main__":
         [-np.pi/2, 0.0, 94.75, 0.0],
         [0.0, 0.0, 82.5, 0.0]
     ], dtype=float)
+
     
     # Derive screw axes
     screw_axes, M = screw_axes_from_dh(ur5_dh_params)
+    print("Screw axes derived from DH parameters:")
+    print(screw_axes)   
+
+    print("Pose of end effector in Home configuration:")    
+    print(M)
+
+    jacobian = compute_space_jacobian(screw_axes, np.zeros(6))
+    print("Jacobian matrix:")
+    print(jacobian)
+
     
     print("="*70)
     print("UR5 VISUALIZATION SUITE")
