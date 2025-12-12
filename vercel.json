@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "projects": [
+    {
+      "name": "ur5-viz",
+      "rootDirectory": "robot-viz"
+    }
+  ],
+  "builds": [
+    {
+      "src": "robot-viz/package.json",
+      "use": "@vercel/static-build"
+    }
+  ],
+  "routes": [
+    { "src": "/(.*)", "dest": "robot-viz/build/$1" }
+  ]
+}
